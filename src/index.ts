@@ -1,7 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
 
-// Use npm run cf-typegen to generate the type definitions for the Durable Object
-
 // Worker
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -12,6 +10,12 @@ export default {
 			if (!upgradeHeader || upgradeHeader !== 'websocket') {
 				return new Response('Durable Object expected Upgrade: websocket', {
 					status: 426,
+				});
+			}
+
+			if (request.method !== 'GET') {
+				return new Response('Durable Object expected GET method', {
+					status: 400,
 				});
 			}
 
@@ -53,6 +57,9 @@ export class WebSocketHibernationServer extends DurableObject {
 				this.sessions.set(ws, { ...session });
 			}
 		});
+
+		// Sets an application level auto response that does not wake hibernated WebSockets.
+		this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
 	}
 
 	async fetch(request: Request): Promise<Response> {
