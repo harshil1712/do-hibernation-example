@@ -8,52 +8,59 @@ export default {
 			// If there is one, accept the request and return a WebSocket Response.
 			const upgradeHeader = request.headers.get('Upgrade');
 			if (!upgradeHeader || upgradeHeader !== 'websocket') {
-				return new Response('Durable Object expected Upgrade: websocket', {
+				return new Response('Worker expected Upgrade: websocket', {
 					status: 426,
 				});
 			}
 
 			if (request.method !== 'GET') {
-				return new Response('Durable Object expected GET method', {
+				return new Response('Worker expected GET method', {
 					status: 400,
 				});
 			}
 
-			// This example will refer to the same Durable Object,
-			// since the name "foo" is hardcoded.
+			// Since we are hard coding the Durable Object ID by providing the constant name 'foo',
+			// all requests to this Worker will be sent to the same Durable Object instance.
 			let id = env.WEBSOCKET_HIBERNATION_SERVER.idFromName('foo');
 			let stub = env.WEBSOCKET_HIBERNATION_SERVER.get(id);
 
 			return stub.fetch(request);
 		}
 
-		return new Response(null, {
-			status: 400,
-			statusText: 'Bad Request',
-			headers: {
-				'Content-Type': 'text/plain',
-			},
-		});
+		return new Response(
+			`Supported endpoints:
+/websocket: Expects a WebSocket upgrade request`,
+			{
+				status: 200,
+				headers: {
+					'Content-Type': 'text/plain',
+				},
+			}
+		);
 	},
 };
 
 // Durable Object
 export class WebSocketHibernationServer extends DurableObject {
-	// Keep track of all WebSocket connections
-	sessions: Map<WebSocket, any>;
+	// Keeps track of all WebSocket connections
+	// When the DO hibernates, gets reconstructed in the constructor
+	sessions: Map<WebSocket, { [key: string]: string }>;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		this.sessions = new Map();
 
-		// DO saves the connection information when it goes to hibernation
+		// As part of constructing the Durable Object,
+		// we wake up any hibernating WebSockets and
+		// place them back in the `sessions` map.
+
 		// Get all WebSocket connections from the DO
 		this.ctx.getWebSockets().forEach((ws) => {
-			// Checks if this is a new DO
+			let attachment = ws.deserializeAttachment();
 			if (ws.deserializeAttachment()) {
-				// If a DO is waking up, deserialize the attachment.
-				// This helps to restore the state of the connection
-				const { ...session } = ws.deserializeAttachment();
+				// If we previously attached state to our WebSocket,
+				// let's add it to `sessions` map to restore the state of the connection.
+				const { ...session } = attachment;
 				this.sessions.set(ws, { ...session });
 			}
 		});
@@ -70,7 +77,7 @@ export class WebSocketHibernationServer extends DurableObject {
 		// Calling `acceptWebSocket()` informs the runtime that this WebSocket is to begin terminating
 		// request within the Durable Object. It has the effect of "accepting" the connection,
 		// and allowing the WebSocket to send and receive messages.
-		// Unlike `ws.accept()`, `state.acceptWebSocket(ws)` informs the Workers Runtime that the WebSocket
+		// Unlike `ws.accept()`, `this.ctx.acceptWebSocket(ws)` informs the Workers Runtime that the WebSocket
 		// is "hibernatable", so the runtime does not need to pin this Durable Object to memory while
 		// the connection is open. During periods of inactivity, the Durable Object can be evicted
 		// from memory, but the WebSocket connection will remain open. If at some later point the
@@ -83,10 +90,7 @@ export class WebSocketHibernationServer extends DurableObject {
 
 		// Attach the session ID to the WebSocket connection and serialize it.
 		// This is necessary to restore the state of the connection when the Durable Object wakes up.
-		server.serializeAttachment({
-			...server.deserializeAttachment(),
-			id,
-		});
+		server.serializeAttachment({ id });
 
 		// Add the WebSocket connection to the map of active sessions.
 		this.sessions.set(server, { id });
@@ -97,25 +101,24 @@ export class WebSocketHibernationServer extends DurableObject {
 		});
 	}
 
-	async webSocketMessage(sender: WebSocket, message: ArrayBuffer | string) {
+	async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string) {
 		// Get the session associated with the WebSocket connection.
-		const session = this.sessions.get(sender);
+		const session = this.sessions.get(ws)!;
 
-		// Upon receiving a message from the client, the server replies with the same message, the session ID of the sender,
+		// Upon receiving a message from the client, the server replies with the same message, the session ID of the connection,
 		// and the total number of connections with the "[Durable Object]: " prefix
-		sender.send(`[Durable Object] message: ${message}, from: ${session.id}. Total connections: ${this.ctx.getWebSockets().length}`);
+		ws.send(`[Durable Object] message: ${message}, from: ${session.id}. Total connections: ${this.sessions.size}`);
 
 		// Send a message to all WebSocket connections, loop over all the connected WebSockets.
-		// This wakes up all the connections and the DO is no longer in hibernation.
-		this.ctx.getWebSockets().forEach((ws) => {
-			ws.send(`[Durable Object] message: ${message}, from: ${session.id}. Total connections: ${this.ctx.getWebSockets().length}`);
+		this.sessions.forEach((attachment, session) => {
+			session.send(`[Durable Object] message: ${message}, from: ${attachment.id}. Total connections: ${this.sessions.size}`);
 		});
 
-		// Send a message to all WebSocket connections except the sender, loop over all the connected WebSockets and filter out the sender.
-		// This wakes up all the connections and the DO is no longer in hibernation.
-		this.ctx.getWebSockets().forEach((ws) => {
-			if (ws !== sender) {
-				ws.send(`[Durable Object] message: ${message}, from: ${session.id}. Total connections: ${this.ctx.getWebSockets().length}`);
+		// Send a message to all WebSocket connections except the connection (ws),
+		// loop over all the connected WebSockets and filter out the connection (ws).
+		this.sessions.forEach((attachment, session) => {
+			if (session !== ws) {
+				session.send(`[Durable Object] message: ${message}, from: ${attachment.id}. Total connections: ${this.sessions.size}`);
 			}
 		});
 	}
